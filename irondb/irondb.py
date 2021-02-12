@@ -244,24 +244,37 @@ class IRONdbMeasurementFetcher(object):
                 else:
                     params['database_rollups'] = self.database_rollups
                 tries = self.retries
+                reqs = []
+                _fatal_error = False
+                def _grequests_exception_handler(request, exception):
+                    log.exception("IRONdbMeasurementFetcher.fetch ConnectionError %s" % exception)
+                    _fatal_errors = (
+                        requests.exceptions.HTTPError,
+                        requests.exceptions.ReadTimeout
+                        )
+                    if exception in _fatal_errors:
+                        _fatal_error = True
+                send_headers = copy.deepcopy(self.headers)                        
+                if self.zipkin_enabled:
+                    if self.zipkin_event_trace_level == 1:
+                        send_headers['X-Mtev-Trace-Event'] = '1'
+                    elif self.zipkin_event_trace_level == 2:
+                        send_headers['X-Mtev-Trace-Event'] = '2'                
                 for i in range(0, max(urls.host_count, tries)):
-                    try:
-                        self.fetched = False
-                        query_start = time.gmtime()
-                        node = urls.series_multi
-                        data_type = "json"
-                        send_headers = copy.deepcopy(self.headers)
-                        if self.zipkin_enabled == True:
-                            traceheader = binascii.hexlify(os.urandom(8))
-                            send_headers['X-B3-TraceId'] = traceheader
-                            send_headers['X-B3-SpanId'] = traceheader
-                            if self.zipkin_event_trace_level == 1:
-                                send_headers['X-Mtev-Trace-Event'] = '1'
-                            elif self.zipkin_event_trace_level == 2:
-                                send_headers['X-Mtev-Trace-Event'] = '2'
-                        d = requests.post(urls.series_multi, json = params, headers = send_headers,
-                                          timeout=((self.connection_timeout / 1000), (self.timeout / 1000)))
-                        d.raise_for_status()
+                    self.fetched = False
+                    query_start = time.gmtime()
+                    node = urls.series_multi
+                    data_type = "json"
+                    if self.zipkin_enabled:
+                        traceheader = binascii.hexlify(os.urandom(8))
+                        send_headers['X-B3-TraceId'] = traceheader
+                        send_headers['X-B3-SpanId'] = traceheader
+                    d = grequests.post(urls.series_multi, json = params, headers = send_headers,
+                                        timeout=((self.connection_timeout / 1000), (self.timeout / 1000)))
+                    reqs.append(d)
+                for d in grequests.imap(reqs, size=self.parallel_requests,
+                            exception_handler=_grequests_exception_handler):   
+                    if d and d.status_code == 200 and not _fatal_error:
                         if 'content-type' in d.headers and d.headers['content-type'] == 'application/x-flatbuffer-metric-get-result-list':
                             self.results = irondb_flatbuf.metric_get_results(d.content)
                             self.fetched = True
@@ -269,30 +282,9 @@ class IRONdbMeasurementFetcher(object):
                         else:
                             self.results = d.json()
                             self.fetched = True
-
                         result_count = len(self.results["series"]) if self.results else -1
                         query_type = "rollup data" if params["database_rollups"] else "raw data"
                         query_log.query_log(node, query_start, d.elapsed, result_count, json.dumps(params), query_type, data_type, start_time, end_time)
-                        break
-                    except requests.exceptions.ConnectionError as ex:
-                        # on down nodes, retry on another up to "tries" times
-                        log.exception("IRONdbMeasurementFetcher.fetch ConnectionError %s" % ex)
-                    except requests.exceptions.ConnectTimeout as ex:
-                        # on down nodes, retry on another up to "tries" times
-                        log.exception("IRONdbMeasurementFetcher.fetch ConnectTimeout %s" % ex)
-                    except irondb_flatbuf.FlatBufferError as ex:
-                        # flatbuffer error, try again
-                        log.exception("IRONdbMeasurementFetcher.fetch FlatBufferError %s" % ex)
-                    except JSONDecodeError as ex:
-                        # json error, try again
-                        log.exception("IRONdbMeasurementFetcher.fetch JSONDecodeError %s" % ex)
-                    except requests.exceptions.ReadTimeout as ex:
-                        # read timeouts are failures, stop immediately
-                        log.exception("IRONdbMeasurementFetcher.fetch ReadTimeout %s" % ex)
-                        break
-                    except requests.exceptions.HTTPError as ex:
-                        # http status code errors are failures, stop immediately
-                        log.exception("IRONdbMeasurementFetcher.fetch HTTPError %s %s" % (ex, d.content))
                         break
             if settings.DEBUG:
                 log.debug("IRONdbMeasurementFetcher.fetch results: %s" % json.dumps(self.results))
@@ -385,57 +377,50 @@ class IRONdbFinder(BaseFinder):
             tries = self.max_retries
             name_headers = copy.deepcopy(self.headers)
             name_headers['Accept'] = 'application/x-flatbuffer-metric-find-result-list'
+            if self.zipkin_enabled:
+                if self.zipkin_event_trace_level == 1:
+                    name_headers['X-Mtev-Trace-Event'] = '1'
+                if self.zipkin_event_trace_level == 2:
+                    name_headers['X-Mtev-Trace-Event'] = '2'
+            reqs = []
+            _fatal_error = False
+            def _grequests_exception_handler(request, exception):
+                log.exception("IRONdbFinder.fetch ConnectionError %s" % exception)
+                _fatal_errors = (
+                    requests.exceptions.HTTPError,
+                    requests.exceptions.ReadTimeout
+                    )
+                if exception in _fatal_errors:
+                    _fatal_error = True                     
             for i in range(0, max(urls.host_count, tries)):
-                try:
-                    node = urls.names
-                    query_start = time.gmtime()
-                    data_type = "json"
-                    if self.zipkin_enabled == True:
-                        traceheader = binascii.hexlify(os.urandom(8))
-                        name_headers['X-B3-TraceId'] = traceheader
-                        name_headers['X-B3-SpanId'] = traceheader
-                        if self.zipkin_event_trace_level == 1:
-                            name_headers['X-Mtev-Trace-Event'] = '1'
-                        if self.zipkin_event_trace_level == 2:
-                            name_headers['X-Mtev-Trace-Event'] = '2'
-                    name_params = {'query': pattern}
-                    if self.activity_tracking:
-                        name_params['activity_start_secs'] = start_time
-                        name_params['activity_end_secs'] = end_time
-                    r = requests.get(node, params=name_params, headers=name_headers,
-                                     timeout=((self.connection_timeout / 1000), (self.timeout / 1000)))
-                    r.raise_for_status()
+                node = urls.names
+                query_start = time.gmtime()
+                data_type = "json"
+                if self.zipkin_enabled == True:
+                    traceheader = binascii.hexlify(os.urandom(8))
+                    name_headers['X-B3-TraceId'] = traceheader
+                    name_headers['X-B3-SpanId'] = traceheader
+                name_params = {'query': pattern}
+                if self.activity_tracking:
+                    name_params['activity_start_secs'] = start_time
+                    name_params['activity_end_secs'] = end_time
+                r = grequests.get(node, params=name_params, headers=name_headers,
+                                    timeout=((self.connection_timeout / 1000), (self.timeout / 1000)))
+                reqs.append(r)                 
+            for r in grequests.imap(reqs, size=self.parallel_requests,
+                                exception_handler=_grequests_exception_handler):   
+                if r and r.status_code == 200 and not _fatal_error:
                     if r.headers['content-type'] == 'application/json':
                         names = r.json()
                     elif r.headers['content-type'] == 'application/x-flatbuffer-metric-find-result-list':
                         names = irondb_flatbuf.metric_find_results(r.content)
                         data_type = "flatbuffer"
                     else:
-                        pass
-                    result_count = len(names) if names else -1
-                    self.query_log(node, query_start, r.elapsed, result_count, pattern, "names", data_type, start_time, end_time)
-                    break
-                except requests.exceptions.ConnectionError as ex:
-                    # on down nodes, try again on another node until "tries"
-                    log.exception("IRONdbFinder.fetch ConnectionError %s" % ex)
-                except requests.exceptions.ConnectTimeout as ex:
-                    # on down nodes, try again on another node until "tries"
-                    log.exception("IRONdbFinder.fetch ConnectTimeout %s" % ex)
-                except irondb_flatbuf.FlatBufferError as ex:
-                    # flatbuffer error, try again
-                    log.exception("IRONdbFinder.fetch FlatBufferError %s" % ex)
-                except JSONDecodeError as ex:
-                    # json error, try again
-                    log.exception("IRONdbFinder.fetch JSONDecodeError %s" % ex)
-                except requests.exceptions.ReadTimeout as ex:
-                    # up node that simply timed out is a failure
-                    log.exception("IRONdbFinder.fetch ReadTimeout %s" % ex)
-                    break
-                except requests.exceptions.HTTPError as ex:
-                    # http status code errors are failures, stop immediately
-                    log.exception("IRONdbFinder.fetch HTTPError %s %s" % (ex, r.content))
-                    break
-
+                        pass   
+                result_count = len(names) if names else -1
+                self.query_log(node, query_start, r.elapsed, result_count, pattern, "names", data_type, start_time, end_time)
+                break
+            
             all_names[pattern] = names
 
         measurement_headers = copy.deepcopy(self.headers)
@@ -513,46 +498,38 @@ class IRONdbFinder(BaseFinder):
         tries = self.max_retries
         name_headers = copy.deepcopy(self.headers)
         name_headers['Accept'] = 'application/x-flatbuffer-metric-find-result-list'
+        if self.zipkin_enabled:
+            if self.zipkin_event_trace_level == 1:
+                name_headers['X-Mtev-Trace-Event'] = '1'
+            elif self.zipkin_event_trace_level == 2:
+                name_headers['X-Mtev-Trace-Event'] = '2'
+        reqs = []
+        _fatal_error = False
+        def _grequests_exception_handler(request, exception):
+            log.exception("IRONdbFinder.find_nodes ConnectionError %s" % exception)
+            _fatal_errors = (
+                requests.exceptions.HTTPError,
+                requests.exceptions.ReadTimeout
+                )
+            if exception in _fatal_errors:
+                _fatal_error = True                        
         for i in range(0, max(urls.host_count, tries)):
-            try:
-                if self.zipkin_enabled == True:
-                    traceheader = binascii.hexlify(os.urandom(8))
-                    name_headers['X-B3-TraceId'] = traceheader
-                    name_headers['X-B3-SpanId'] = traceheader
-                    if self.zipkin_event_trace_level == 1:
-                        name_headers['X-Mtev-Trace-Event'] = '1'
-                    elif self.zipkin_event_trace_level == 2:
-                        name_headers['X-Mtev-Trace-Event'] = '2'
-                r = requests.get(urls.names, params={'query': query.pattern}, headers=name_headers,
-                                 timeout=((self.connection_timeout / 1000), (self.timeout / 1000)))
-                r.raise_for_status()
+            if self.zipkin_enabled:
+                traceheader = binascii.hexlify(os.urandom(8))
+                name_headers['X-B3-TraceId'] = traceheader
+                name_headers['X-B3-SpanId'] = traceheader
+            r = grequests.get(urls.names, params={'query': query.pattern}, headers=name_headers,
+                                timeout=((self.connection_timeout / 1000), (self.timeout / 1000)))
+            reqs.append(r)                 
+        for r in grequests.imap(reqs, size=self.parallel_requests,
+                                    exception_handler=_grequests_exception_handler):
+            if r and r.status_code() == 200 and not _fatal_error:
                 if r.headers['content-type'] == 'application/json':
                     names = r.json()
                 elif r.headers['content-type'] == 'application/x-flatbuffer-metric-find-result-list':
                     names = irondb_flatbuf.metric_find_results(r.content)
                 else:
-                    pass
-                break
-            except requests.exceptions.ConnectionError as ex:
-                # on down nodes, try again on another node until "tries"
-                log.exception("IRONdbFinder.find_nodes ConnectionError %s" % ex)
-            except requests.exceptions.ConnectTimeout as ex:
-                # on down nodes, try again on another node until "tries"
-                log.exception("IRONdbFinder.find_nodes ConnectTimeout %s" % ex)
-            except irondb_flatbuf.FlatBufferError as ex:
-                # flatbuffer error, try again
-                log.exception("IRONdbFinder.find_nodes FlatBufferError %s" % ex)
-            except JSONDecodeError as ex:
-                # json error, try again
-                log.exception("IRONdbFinder.find_nodes JSONDecodeError %s" % ex)
-            except requests.exceptions.ReadTimeout as ex:
-                # up node that simply timed out is a failure
-                log.exception("IRONdbFinder.find_nodes ReadTimeout %s" % ex)
-                break
-            except requests.exceptions.HTTPError as ex:
-                # http status code errors are failures, stop immediately
-                log.exception("IRONdbFinder.find_nodes HTTPError %s %s" % (ex, r.content))
-                break
+                    names = None
         if settings.DEBUG:
             log.debug("IRONdbFinder.find_nodes, result: %s" % json.dumps(names))
 
@@ -562,7 +539,6 @@ class IRONdbFinder(BaseFinder):
         measurement_headers['Accept'] = 'application/x-flatbuffer-metric-get-result-list'
         fetcher = IRONdbMeasurementFetcher(measurement_headers, self.timeout, self.connection_timeout, self.database_rollups, self.rollup_window, self.max_retries,
                                            self.zipkin_enabled, self.zipkin_event_trace_level)
-
         for name in names:
             if 'leaf' in name and 'leaf_data' in name:
                 fetcher.add_leaf(name['name'], name['leaf_data'])
@@ -601,31 +577,30 @@ class IRONdbTagFetcher(BaseTagDB):
                 )
             if exception in _fatal_errors:
                 _fatal_error = True 
-        if self.zipkin_enabled == True:
-            traceheader = binascii.hexlify(os.urandom(8))
-            tag_headers['X-B3-TraceId'] = traceheader
-            tag_headers['X-B3-SpanId'] = traceheader
+        if self.zipkin_enabled:
             if self.zipkin_event_trace_level == 1:
                 tag_headers['X-Mtev-Trace-Event'] = '1'
             elif self.zipkin_event_trace_level == 2:
                 tag_headers['X-Mtev-Trace-Event'] = '2'
         for i in range(0, max(urls.host_count, self.max_retries)):
+            if self.zipkin_enabled:
+                traceheader = binascii.hexlify(os.urandom(8))
+                tag_headers['X-B3-TraceId'] = traceheader
+                tag_headers['X-B3-SpanId'] = traceheader
             r = grequests.get(url, params=query, headers=tag_headers,
                                     timeout=((self.connection_timeout / 1000), (self.timeout / 1000)))
             reqs.append(r)
         for r in grequests.imap(reqs, size=self.parallel_requests, 
                                     exception_handler=_grequests_exception_handler):
-            if r:
+            if r and r.status_code() == 200 and not _fatal_error:
                 if flatbuffers:
                     r = irondb_flatbuf.metric_find_results(r.content)
                 else:
                     r = r.json()
                 if settings.DEBUG:
                     log.debug("IRONdbTagFetcher.%s, result: %s" % (source, json.dumps(r)))
-                if not _fatal_error:
-                    return r
-                else:
-                    return ()
+                return r
+        return ()
 
     def _find_series(self, tags, requestContext=None):
         query = ','.join(tags)
