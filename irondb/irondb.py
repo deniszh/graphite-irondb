@@ -109,11 +109,18 @@ class IRONdbLocalSettings(object):
 
     def __init__(self):
         global urls
+        try:
+            _rotate_urls = getattr(settings, 'IRONDB_URLS_ROTATE')
+        except AttributeError:
+            _rotate_urls = True        
         if urls is None:
             urls = getattr(settings, 'IRONDB_URLS')
             if not urls:
                 urls = [settings.IRONDB_URL]
-            urls = URLs(urls, rotate=os.getpid())
+            if _rotate_urls:
+                urls = URLs(urls, rotate=os.getpid())
+            else:
+                urls = URLs(urls)
         try:
             bs = getattr(settings, 'IRONDB_BATCH_SIZE')
             if bs:
