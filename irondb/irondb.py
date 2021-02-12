@@ -52,9 +52,13 @@ def strip_prefix(path):
     return urlunparse(url), prefix
 
 class URLs(object):
-    def __init__(self, hosts):
+    def __init__(self, hosts, rotate=None):
+        len_hosts = len(hosts)
+        if rotate and isinstance(rotate, int) and len_hosts > 1:
+            r = rotate % len_hosts
+            hosts = hosts[r:] + hosts[:r]
         self.iterator = itertools.cycle(hosts)
-        self.hc = len(hosts)
+        self.hc = len_hosts
 
     @property
     def host(self):
@@ -109,7 +113,7 @@ class IRONdbLocalSettings(object):
             urls = getattr(settings, 'IRONDB_URLS')
             if not urls:
                 urls = [settings.IRONDB_URL]
-            urls = URLs(urls)
+            urls = URLs(urls, rotate=os.getpid())
         try:
             bs = getattr(settings, 'IRONDB_BATCH_SIZE')
             if bs:
