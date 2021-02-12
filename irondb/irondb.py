@@ -355,7 +355,7 @@ class IRONdbFinder(BaseFinder):
 
     def newfetcher(self, fset, headers):
         fetcher = IRONdbMeasurementFetcher(headers, self.timeout, self.connection_timeout, self.database_rollups, self.rollup_window, self.max_retries,
-                                           self.zipkin_enabled, self.zipkin_event_trace_level)
+        self.zipkin_enabled, self.zipkin_event_trace_level, self.parallel_requests)
         fset.append(fetcher)
         return fetcher
 
@@ -532,8 +532,7 @@ class IRONdbFinder(BaseFinder):
         # so we can do these in batches.
         measurement_headers = copy.deepcopy(self.headers)
         measurement_headers['Accept'] = 'application/x-flatbuffer-metric-get-result-list'
-        fetcher = IRONdbMeasurementFetcher(measurement_headers, self.timeout, self.connection_timeout, self.database_rollups, self.rollup_window, self.max_retries,
-                                           self.zipkin_enabled, self.zipkin_event_trace_level)
+        fetcher = IRONdbMeasurementFetcher(measurement_headers, self.timeout, self.connection_timeout, self.database_rollups, self.rollup_window, self.max_retries, self.zipkin_enabled, self.zipkin_event_trace_level, self.parallel_requests)
         for name in names:
             if 'leaf' in name and 'leaf_data' in name:
                 fetcher.add_leaf(name['name'], name['leaf_data'])
