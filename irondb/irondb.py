@@ -15,11 +15,6 @@ try:
 except ImportError:
     from urllib.parse import urlparse, urlunparse
 
-try:
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-except ImportError:
-    pass
-
 import requests
 import grequests
 import django
@@ -420,7 +415,7 @@ class IRONdbFinder(BaseFinder):
                 result_count = len(names) if names else -1
                 self.query_log(node, query_start, r.elapsed, result_count, pattern, "names", data_type, start_time, end_time)
                 break
-            
+
             all_names[pattern] = names
 
         measurement_headers = copy.deepcopy(self.headers)
